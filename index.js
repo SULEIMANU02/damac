@@ -569,7 +569,7 @@ Note:  Reply with #️⃣ to go back to the main menu`);
                         const recipient = beneficiary.get(chatId);
                         airtimeAmount.set(chatId, amount);
 
-                        if (amount < 50) {
+                        if (amount < 10) {
                             await send(`     📳 *Buy Airtime* 📳
 
 ❌ ⚡️⚡️ ❌
