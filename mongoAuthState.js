@@ -73,20 +73,33 @@ module.exports = useMongoDBAuthState = async (collection) => {
     };
     return collection.updateOne({ _id: id }, update, { upsert: true });
   };
+  
   const readData = async (id) => {
     try {
-      const data = JSON.stringify(await collection.findOne({ _id: id }));
-      return JSON.parse(data, BufferJSON.reviver);
+      const data = await collection.findOne({ _id: id });
+      if (!data) return null;
+      
+      // Remove MongoDB's _id field before parsing
+      delete data._id;
+      
+      const dataString = JSON.stringify(data);
+      return JSON.parse(dataString, BufferJSON.reviver);
     } catch (error) {
+      console.error(`Error reading data for ${id}:`, error.message);
       return null;
     }
   };
+  
   const removeData = async (id) => {
     try {
       await collection.deleteOne({ _id: id });
-    } catch (_a) {}
+    } catch (error) {
+      console.error(`Error removing data for ${id}:`, error.message);
+    }
   };
-  const creds = (await readData("creds")) || (0, initAuthCreds)();
+  
+  const creds = (await readData("creds")) || initAuthCreds();
+  
   return {
     state: {
       creds,
@@ -96,10 +109,16 @@ module.exports = useMongoDBAuthState = async (collection) => {
           await Promise.all(
             ids.map(async (id) => {
               let value = await readData(`${type}-${id}`);
-              if (type === "app-state-sync-key") {
-                value = proto.Message.AppStateSyncKeyData.fromObject(data);
+              
+              // BUG FIX: This was using 'data' instead of 'value'!
+              if (type === "app-state-sync-key" && value) {
+                value = proto.Message.AppStateSyncKeyData.fromObject(value);
               }
-              data[id] = value;
+              
+              // Only add to data if value exists
+              if (value) {
+                data[id] = value;
+              }
             })
           );
           return data;

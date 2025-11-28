@@ -10,8 +10,8 @@ const { fetchAirtel, fetchGlo, fetchMobile, fetchMtn } = require('./plans');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const mongoURL = "mongodb+srv://maisamira6:S4u3l2e14321@cluster0.rm2ysfe.mongodb.net/?appName=Cluster0";
-
+// Replace with your correct credentials
+const mongoURL = "mongodb+srv://maisamira6:kp7LIfA7ZODudVtM@cluster0.rm2ysfe.mongodb.net/?appName=Cluster0"
 const userStates = new Map();
 const userIndex = new Map();
 const beneficiary = new Map();
@@ -19,26 +19,109 @@ const usernetwork = new Map();
 const airtimeAmount = new Map();
 const userDataType = new Map();
 
+async function extractPhoneNumber(message, sock) {
+    const chatId = message.key.remoteJid;
+    let phoneNumber = null;
+
+    try {
+        if (chatId.includes('@lid')) {
+            const alternateJid = message.key.remoteJidAlt || message.key.participant;
+            
+            if (alternateJid && alternateJid.includes('@s.whatsapp.net')) {
+                phoneNumber = alternateJid.split('@')[0];
+                console.log('📱 LID message. Phone from alt:', phoneNumber);
+            } else {
+                try {
+                    const pn = await sock.signalRepository?.lidMapping?.getPNForLID(chatId);
+                    if (pn) {
+                        phoneNumber = pn.split('@')[0];
+                        console.log('📱 LID mapped to PN:', phoneNumber);
+                    }
+                } catch (lidError) {
+                    console.log('⚠️  Could not map LID:', lidError.message);
+                }
+                
+                if (!phoneNumber) {
+                    phoneNumber = chatId.split('@')[0];
+                    console.log('⚠️  Using LID as identifier:', phoneNumber);
+                }
+            }
+        } else if (chatId.includes('@s.whatsapp.net')) {
+            phoneNumber = chatId.split('@')[0];
+            console.log('📱 PN message. Phone:', phoneNumber);
+        }
+    } catch (error) {
+        console.error('❌ Error extracting phone:', error.message);
+    }
+
+    return phoneNumber;
+}
+
 let mongoClient;
 let isConnected = false;
-let shouldClearAuth = false; // Flag to control when to clear auth
+let shouldClearAuth = false;
+let mongoConnecting = false; // Prevent multiple connection attempts
+
+async function ensureMongoConnection() {
+    if (mongoConnecting) {
+        console.log('⏳ MongoDB connection already in progress...');
+        return false;
+    }
+
+    if (mongoClient && mongoClient.topology && mongoClient.topology.isConnected()) {
+        return true;
+    }
+
+    mongoConnecting = true;
+
+    try {
+        if (mongoClient) {
+            try {
+                await mongoClient.close();
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        console.log('🔄 Connecting to MongoDB...');
+        
+        mongoClient = new MongoClient(mongoURL, {
+            serverSelectionTimeoutMS: 30000,
+            connectTimeoutMS: 30000,
+            socketTimeoutMs: 45000,
+            retryWrites: true,
+            retryReads: true,
+            maxPoolSize: 10,
+            minPoolSize: 2,
+            tls: true,
+            tlsAllowInvalidCertificates: true,
+            tlsAllowInvalidHostnames: true,
+        });
+
+        await mongoClient.connect();
+        console.log('✅ Connected to MongoDB');
+        mongoConnecting = false;
+        return true;
+    } catch (error) {
+        console.error('❌ MongoDB connection error:', error.message);
+        mongoConnecting = false;
+        mongoClient = null;
+        return false;
+    }
+}
 
 async function connectToWhatsApp() {
     try {
-        // Connect to MongoDB
-        if (!mongoClient) {
-            mongoClient = new MongoClient(mongoURL, {
-                serverSelectionTimeoutMS: 5000,
-                socketTimeoutMS: 45000,
-            });
-            await mongoClient.connect();
-            console.log('✅ Connected to MongoDB');
+        // Ensure MongoDB is connected
+        const connected = await ensureMongoConnection();
+        if (!connected) {
+            throw new Error('Failed to connect to MongoDB');
         }
 
         const db = mongoClient.db("whatsapp_api");
         const collection = db.collection("auth_info_baileys");
 
-        // Only clear auth if explicitly needed (e.g., after logout or auth error)
+        // Clear auth if needed
         if (shouldClearAuth) {
             console.log('🗑️  Clearing authentication data...');
             await collection.deleteMany({});
@@ -50,16 +133,19 @@ async function connectToWhatsApp() {
         const { version } = await fetchLatestBaileysVersion();
 
         console.log('✅ Auth state initialized');
+        console.log('✅ Using Baileys version:', version.join('.'));
 
         const sock = makeWASocket({
             auth: state,
             version,
             logger: pino({ level: 'silent' }),
-            browser: ['Chrome (Linux)', '', ''],
+            browser: ['Sauki Data Bot', 'Chrome', '1.0.0'],
             printQRInTerminal: false,
             syncFullHistory: false,
-            markOnlineOnConnect: false,
-            defaultQueryTimeoutMs: undefined,
+            markOnlineOnConnect: true,
+            defaultQueryTimeoutMs: 60000,
+            connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,
             getMessage: async (key) => {
                 return { conversation: '' };
             }
@@ -90,7 +176,6 @@ async function connectToWhatsApp() {
                 console.log('Status Code:', statusCode);
                 console.log('Error:', lastDisconnect?.error?.message || 'Unknown');
 
-                // Set flag to clear auth only on specific error codes
                 if (statusCode === 405 || statusCode === 401 || statusCode === 403) {
                     console.log('\n⚠️  Auth issue detected - will clear on next connection');
                     shouldClearAuth = true;
@@ -105,7 +190,11 @@ async function connectToWhatsApp() {
                 } else {
                     console.log('🔒 Logged out - clearing auth\n');
                     shouldClearAuth = true;
-                    if (mongoClient) await mongoClient.close();
+                    if (mongoClient) {
+                        try {
+                            await mongoClient.close();
+                        } catch (e) {}
+                    }
                     process.exit(0);
                 }
             } else if (connection === 'open') {
@@ -113,43 +202,89 @@ async function connectToWhatsApp() {
                 console.log('\n==============================================');
                 console.log('✅  SUCCESSFULLY CONNECTED TO WHATSAPP!');
                 console.log('==============================================');
-                console.log('🤖  Damac Sub Bot is now active');
+                console.log('🤖  Sauki Sub Bot is now active');
                 console.log('📱  Ready to receive messages');
                 console.log('⏰  Started at:', new Date().toLocaleString());
+                console.log('📞  Waiting for messages...');
                 console.log('==============================================\n');
                 isConnected = true;
-                shouldClearAuth = false; // Reset flag on successful connection
+                shouldClearAuth = false;
             } else if (connection === 'connecting') {
                 console.log('🔄 Connecting to WhatsApp...');
             }
         });
 
-        sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('creds.update', async () => {
+            try {
+                await saveCreds();
+            } catch (error) {
+                console.error('❌ Error saving credentials:', error.message);
+                // Try to reconnect if save fails
+                await ensureMongoConnection();
+            }
+        });
 
+        
         sock.ev.on("messages.upsert", async (messageInfoUpsert) => {
             try {
-                const message = messageInfoUpsert.messages?.[0];
-                if (!message) return;
+            const message = messageInfoUpsert.messages?.[0];
+            if (!message) return;
 
-                const text = message?.message?.conversation || message?.message?.extendedTextMessage?.text || '';
+           const chatId = message.key.remoteJid;
+const text = message?.message?.conversation || message?.message?.extendedTextMessage?.text || '';
 
-                if (message.key.fromMe) {
-                    console.log('⏭️  Skipping own message');
-                    return;
-                }
+if (message.key.fromMe) {
+    console.log('⏭️  Skipping own message');
+    return;
+}
 
-                const chatId = message.key.remoteJid;
-                if (!chatId || !chatId.includes('@s.whatsapp.net')) {
-                    console.log('⏭️  Skipping non-user message');
-                    return;
-                }
+// Skip groups and broadcasts
+if (chatId.includes('@g.us') || chatId.includes('@broadcast')) {
+    console.log('⏭️  Skipping group/broadcast message');
+    return;
+}
 
-                console.log('✅ Processing message from:', chatId);
-                console.log('📝 Message text:', text);
+// Extract the actual phone number using the new Baileys fields
+let phoneNumber;
+let userIdentifier;
 
-                const phoneNumber = chatId.split('@')[0];
-                const modifiedPhoneNumber = '0' + phoneNumber.slice(3);
-                const currentState = userStates.get(chatId);
+// Check for alternate JIDs (remoteJidAlt for DMs, participantAlt for groups)
+if (chatId.includes('@lid')) {
+    // New LID format - get the PN from alternate field
+    const alternateJid = message.key.remoteJidAlt || message.key.participant;
+    
+    if (alternateJid && alternateJid.includes('@s.whatsapp.net')) {
+        phoneNumber = alternateJid.split('@')[0];
+        userIdentifier = phoneNumber; // Use phone number as consistent identifier
+        console.log('📱 LID message. Phone from alt:', phoneNumber);
+    } else {
+        // Fallback: Use LID mapping from Baileys store
+        const lidId = chatId.split('@')[0];
+        // Try to get PN from LID using Baileys internal store
+        try {
+            const pn = await sock.signalRepository.lidMapping.getPNForLID(chatId);
+            phoneNumber = pn ? pn.split('@')[0] : lidId;
+            userIdentifier = phoneNumber;
+            console.log('📱 LID mapped to PN:', phoneNumber);
+        } catch (error) {
+            console.log('⚠️  Could not map LID to PN, using LID as identifier');
+            phoneNumber = lidId;
+            userIdentifier = chatId;
+        }
+    }
+} else if (chatId.includes('@s.whatsapp.net')) {
+    // Old PN format
+    phoneNumber = chatId.split('@')[0];
+    userIdentifier = phoneNumber;
+    console.log('📱 PN message. Phone:', phoneNumber);
+} else {
+    console.log('⏭️  Unknown message format');
+    return;
+}
+
+// Use phone number as the consistent state key
+const modifiedPhoneNumber = '0' + phoneNumber.slice(3);
+const currentState = userStates.get(chatId);
 
                 console.log('🔄 Current state:', currentState || 'NEW_USER');
 
@@ -186,7 +321,7 @@ Press #️⃣ to go back to the main menu or reply with the appropriate menu num
                     const welcomeMessage = `*Good Day, ${names}* 🎉,
 \n🤑 *Available Balance: ₦${balance === "N/A" ? '0' : balance}*
 
-${account === 'Not available' ? 'generate account number from your dashboard' :
+${account === 'N/A' ? 'generate account number from your dashboard' :
                             `\n💰 *Acc No: ${account}*
 💰 *Bank: Palmpay Bank*`}
 \nPay Bills Below 👇
@@ -195,7 +330,9 @@ ${account === 'Not available' ? 'generate account number from your dashboard' :
 2️⃣ Buy Airtime
 3️⃣ Fund Wallet
 4️⃣ Talk to Support
-\n⚡️https://damacsub.com/ ⚡️`;
+\n⚡️https://damacsub.com/ ️
+You can check the available plans and prices here.👇🏾
+https://damacsub.com/pricing.html⚡️`;
 
                     if (!currentState) {
                         if (response.data && response.data.success) {
@@ -696,26 +833,37 @@ We wish to see you again,`);
 
     } catch (error) {
         console.error('❌ Fatal Error:', error.message);
-        if (mongoClient) await mongoClient.close();
-
-        console.log('\n🔄 Retrying in 10 seconds...\n');
+        
+        console.log('\n🔄 Retrying in 15 seconds...\n');
         setTimeout(() => {
             connectToWhatsApp();
-        }, 10000);
+        }, 15000);
     }
 }
 
-// Start Express server
 app.get('/', (req, res) => {
-    res.send('WhatsApp API is running');
+    res.json({ 
+        status: 'running', 
+        connected: isConnected,
+        activeUsers: userStates.size,
+        timestamp: new Date().toISOString()
+    });
 });
 
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: isConnected ? 'connected' : 'disconnected',
+        activeUsers: userStates.size
+    });
+});
+
+
 console.log('\n==============================================');
-console.log('🚀  STARTING DAMAC SUB WHATSAPP BOT');
+console.log('🚀  STARTING Sauki SUB WHATSAPP BOT');
 console.log('==============================================\n');
 
 app.listen(PORT, () => {
-    console.log(`✅ Server is running on port ${PORT}`);
+    console.log(`✅ Server running on port ${PORT}\n`);
     connectToWhatsApp().catch(err => {
         console.error('❌ Fatal error:', err);
         process.exit(1);
